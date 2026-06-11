@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Carteira para TSV</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="app-header">
+      <div class="brand-icon" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      <div>
+        <h1>Carteira para TSV</h1>
+        <p>Exporta todos os produtos carregados na carteira atual.</p>
+      </div>
+    </header>
+
+    <button id="baixar" class="button" type="button">
+      <span aria-hidden="true">↓</span>
+      <span>Baixar produtos em TSV</span>
+    </button>
+
+    <div id="mensagem" class="message" role="status" aria-live="polite"></div>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

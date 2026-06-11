@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Carteira para TSV",
+  "version": "2.5.0",
+  "description": "Exporta os produtos de renda fixa exibidos na carteira para um arquivo TSV.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "Carteira para TSV",
+    "default_popup": "popup.html"
+  }
+}

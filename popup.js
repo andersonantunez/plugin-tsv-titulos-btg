@@ -35,6 +35,98 @@ function formatarValorLiquido(valor) {
   return formatarNumeroBrasileiro(valor);
 }
 
+function converterNumeroBrasileiro(valor) {
+  if (typeof valor === "number") return Number.isFinite(valor) ? valor : null;
+  if (valor === null || valor === undefined) return null;
+
+  const bruto = limparCelula(valor);
+  if (!bruto) return null;
+
+  const normalizado = bruto
+    .replace(/^R\$\s*/i, "")
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace(/[^\d.-]/g, "");
+
+  if (!normalizado || normalizado === "-" || normalizado === ".") return null;
+  const numero = Number(normalizado);
+  return Number.isFinite(numero) ? numero : null;
+}
+
+function formatarDecimalBrasileiro(valor, casas = 2) {
+  if (!Number.isFinite(valor)) return "";
+  return valor.toLocaleString("pt-BR", {
+    useGrouping: false,
+    minimumFractionDigits: casas,
+    maximumFractionDigits: casas
+  });
+}
+
+function calcularValorInvestido(produto) {
+  return converterNumeroBrasileiro(produto.valorInvestido);
+}
+
+function classificarIndexador(taxa) {
+  const valor = limparCelula(taxa)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+
+  if (/IPCA|IGP-M|IGPM|INPC/.test(valor)) return "INFLAÇÃO";
+  if (/CDI|SELIC|DI\b/.test(valor)) return "PÓS-FIXADO";
+  if (valor) return "PRÉ-FIXADO";
+  return "";
+}
+
+function interpretarDataBrasileira(valor) {
+  const partes = limparCelula(valor).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!partes) return null;
+
+  const data = new Date(Number(partes[3]), Number(partes[2]) - 1, Number(partes[1]));
+  if (
+    data.getFullYear() !== Number(partes[3]) ||
+    data.getMonth() !== Number(partes[2]) - 1 ||
+    data.getDate() !== Number(partes[1])
+  ) return null;
+
+  data.setHours(0, 0, 0, 0);
+  return data;
+}
+
+function obterPeriodoDecorrido(emissao) {
+  const inicio = interpretarDataBrasileira(emissao);
+  const fim = new Date();
+  fim.setHours(0, 0, 0, 0);
+  if (!inicio || inicio > fim) return { corridos: null, uteis: null };
+
+  // Arredondar evita desvios de uma hora causados por mudanças históricas de fuso/DST.
+  const corridos = Math.round((fim - inicio) / 86400000);
+  let uteis = 0;
+  const cursor = new Date(inicio);
+  cursor.setDate(cursor.getDate() + 1);
+
+  while (cursor <= fim) {
+    const diaSemana = cursor.getDay();
+    if (diaSemana !== 0 && diaSemana !== 6) uteis += 1;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return { corridos, uteis };
+}
+
+function calcularRentabilidades(produto, valorInvestido, diasUteis) {
+  const valorLiquido = converterNumeroBrasileiro(produto.valorLiquido);
+  if (valorInvestido === null || valorInvestido <= 0 || valorLiquido === null) {
+    return { liquida: null, porDiaUtil: null };
+  }
+
+  const liquida = ((valorLiquido / valorInvestido) - 1) * 100;
+  const porDiaUtil = diasUteis > 0
+    ? (Math.pow(valorLiquido / valorInvestido, 1 / diasUteis) - 1) * 100
+    : null;
+  return { liquida, porDiaUtil };
+}
+
 function obterTimestampVencimento(valor) {
   const data = limparCelula(valor);
   const partes = data.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -65,45 +157,78 @@ function gerarTsv(produtos) {
     "Código",
     "Produto",
     "Tipo",
-    "PreçoUnitário",
-    "Quantidade",
+    "Valor Investido",
     "Emissão",
     "Vencimento",
+    "Dias Corridos",
+    "Dias Úteis",
     "Taxa",
-    "ValorLiquido"
+    "Tipo Indexador",
+    "Preço Unitário",
+    "Quantidade",
+    "Valor Líquido",
+    "Rentabilidade Líquida",
+    "Rentabilidade Média"
   ];
 
-  const linhas = ordenarPorVencimento(produtos).map(produto => [
-    limparCelula(produto.codigo),
-    limparCelula(produto.produto),
-    limparCelula(produto.tipo),
-    formatarPrecoUnitario(produto.precoUnitario),
-    formatarQuantidade(produto.quantidade),
-    limparCelula(produto.emissao),
-    limparCelula(produto.vencimento),
-    limparCelula(produto.taxa),
-    formatarValorLiquido(produto.valorLiquido)
-  ].join("\t"));
+  const linhas = ordenarPorVencimento(produtos).map(produto => {
+    const valorInvestido = calcularValorInvestido(produto);
+    const periodo = obterPeriodoDecorrido(produto.emissao);
+    const rentabilidades = calcularRentabilidades(produto, valorInvestido, periodo.uteis);
+
+    return [
+      limparCelula(produto.codigo),
+      limparCelula(produto.produto),
+      limparCelula(produto.tipo),
+      formatarDecimalBrasileiro(valorInvestido),
+      limparCelula(produto.emissao),
+      limparCelula(produto.vencimento),
+      periodo.corridos ?? "",
+      periodo.uteis ?? "",
+      limparCelula(produto.taxa),
+      classificarIndexador(produto.taxa),
+      formatarPrecoUnitario(produto.precoUnitario),
+      formatarQuantidade(produto.quantidade),
+      formatarValorLiquido(produto.valorLiquido),
+      formatarDecimalBrasileiro(rentabilidades.liquida, 6),
+      formatarDecimalBrasileiro(rentabilidades.porDiaUtil, 8)
+    ].join("\t");
+  });
 
   return [cabecalho.join("\t"), ...linhas].join("\n");
 }
 
-function baixarArquivo(conteudo) {
+async function baixarArquivo(conteudo) {
   const blob = new Blob(["\uFEFF", conteudo], {
     type: "text/tab-separated-values;charset=utf-8"
   });
   const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
   const agora = new Date();
   const data = agora.toISOString().slice(0, 10);
   const hora = agora.toTimeString().slice(0, 8).replace(/:/g, "-");
+  const nomeArquivo = `carteira-produtos-${data}_${hora}.tsv`;
 
-  link.href = url;
-  link.download = `carteira-produtos-${data}_${hora}.tsv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    if (chrome.downloads?.download) {
+      await chrome.downloads.download({
+        url,
+        filename: nomeArquivo,
+        saveAs: false,
+        conflictAction: "uniquify"
+      });
+      return;
+    }
+
+    // Fallback para navegadores que não disponibilizem chrome.downloads.
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = nomeArquivo;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
 }
 
 async function obterAbaAtiva() {
@@ -130,17 +255,27 @@ async function extrairNaPagina(tabId) {
         .trim()
         .toLowerCase();
 
-      const dispararClique = elemento => {
-        if (!elemento) return;
-        elemento.dispatchEvent(new MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: window
-        }));
+      const clicar = elemento => {
+        if (!elemento) return false;
+        try {
+          elemento.click();
+          return true;
+        } catch (_) {
+          try {
+            elemento.dispatchEvent(new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              view: window
+            }));
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
       };
 
-      const esperarAte = async (condicao, limiteMs = 2500, intervaloMs = 80) => {
+      const esperarAte = async (condicao, limiteMs = 1800, intervaloMs = 60) => {
         const inicio = Date.now();
         while (Date.now() - inicio < limiteMs) {
           const valor = condicao();
@@ -150,43 +285,153 @@ async function extrairNaPagina(tabId) {
         return condicao() || null;
       };
 
-      const obterCategoria = linha => {
-        const categoriasValidas = new Set(["CDB", "LCI", "LCA"]);
-        const tabelaDesign = linha.closest("orq-table-design");
-        let anterior = tabelaDesign?.previousElementSibling;
+      const localizarCardRendaFixa = () =>
+        document.querySelector('core-expandable-card[data-testid="allocation-summary-card-id-RF"]') ||
+        [...document.querySelectorAll("core-expandable-card")].find(item =>
+          normalizar(texto(item.querySelector('[data-testid="type"]'))) === "renda fixa"
+        );
 
-        while (anterior) {
-          const titulo = texto(anterior.querySelector?.("h1")).toUpperCase();
-          if (categoriasValidas.has(titulo)) return titulo;
-          anterior = anterior.previousElementSibling;
-        }
+      const card = localizarCardRendaFixa();
+      if (!card) {
+        return { produtos: [], motivo: "Não foi possível localizar o card de Renda Fixa." };
+      }
 
-        // Fallback: localiza o último cabeçalho de categoria posicionado antes da linha.
-        const cabecalhos = [...document.querySelectorAll(
-          "portfolio-allocation-summary-detail-header h1"
+      let linhas = [...card.querySelectorAll(
+        'tr[data-testid="product"], tr.bank-deposit-products__product'
+      )];
+
+      if (!linhas.length) {
+        const cabecalho = card.querySelector(
+          'header[data-testid="card-header"], [data-system-integration-element-id="EXPANDABLE_CARD_HEADER"]'
+        );
+        clicar(cabecalho);
+        await esperarAte(() => card.querySelector('tr[data-testid="product"]'), 2200, 60);
+        linhas = [...card.querySelectorAll(
+          'tr[data-testid="product"], tr.bank-deposit-products__product'
         )];
+      }
 
-        for (let indice = cabecalhos.length - 1; indice >= 0; indice -= 1) {
-          const cabecalho = cabecalhos[indice];
-          const titulo = texto(cabecalho).toUpperCase();
-          const estaAntesDaLinha = Boolean(
+      const obterTituloProduto = linha => texto(linha.querySelector(
+        '[data-testid="summary-title"], .product__title, .bank-deposit-products__product-title'
+      ));
+
+      linhas = linhas.filter(linha => obterTituloProduto(linha));
+      if (!linhas.length) {
+        return { produtos: [], motivo: "Nenhuma linha de produto foi encontrada em Renda Fixa." };
+      }
+
+      const obterCategoria = linha => {
+        const validas = new Set(["CDB", "LCI", "LCA"]);
+        const grupo = linha.closest(".portfolio-allocation-product-group");
+        const tituloGrupo = texto(grupo?.querySelector(
+          'portfolio-allocation-summary-detail-header h1, [data-testid="allocation-summary-header-description"]'
+        )).toUpperCase();
+        if (validas.has(tituloGrupo)) return tituloGrupo;
+
+        const cabecalhos = [...card.querySelectorAll(
+          'portfolio-allocation-summary-detail-header h1, [data-testid="allocation-summary-header-description"]'
+        )];
+        for (let i = cabecalhos.length - 1; i >= 0; i -= 1) {
+          const cabecalho = cabecalhos[i];
+          const categoria = texto(cabecalho).toUpperCase();
+          const antes = Boolean(
             cabecalho.compareDocumentPosition(linha) & Node.DOCUMENT_POSITION_FOLLOWING
           );
-
-          if (estaAntesDaLinha && categoriasValidas.has(titulo)) return titulo;
+          if (antes && validas.has(categoria)) return categoria;
         }
-
         return "";
+      };
+
+      const obterPrecoQuantidade = linha => {
+        const container = linha.querySelector(
+          'section.portfolio-allocation-listing-quantity, ' +
+          '[portfolio-allocation-listing-quantity] section, ' +
+          '.bank-deposit-products__product-quantity'
+        );
+        return {
+          precoUnitario: texto(container?.querySelector("span")),
+          quantidade: texto(container?.querySelector("small"))
+        };
+      };
+
+      const obterExpansor = linha => {
+        const celula = linha.querySelector('td[portfolio-allocation-listing-expand-toggle]');
+        return celula?.querySelector(
+          'orq-icon-container[name="chevron-down"], orq-icon-container.portfolio-allocation-listing-expand-toggle'
+        ) ||
+        linha.querySelector('.bank-deposit-products__product-expand-button') ||
+        linha.querySelector('orq-icon-container.portfolio-allocation-listing-expand-toggle') ||
+        celula ||
+        linha.querySelector('[portfolio-allocation-listing-expand-toggle]');
+      };
+
+      const obterHostDetalhe = linha => {
+        const linhaDetalhe = linha.nextElementSibling;
+        if (!linhaDetalhe) return null;
+        return linhaDetalhe.querySelector(
+          '.portfolio-allocation-product-detail, .bank-deposit-products__product-detail'
+        ) || linhaDetalhe;
+      };
+
+      const obterRaizDetalhe = linha => {
+        const host = obterHostDetalhe(linha);
+        if (!host) return null;
+        return host.querySelector(
+          'portfolio-bank-deposit-products-detail, .bank-deposit-products-detail, ' +
+          '[data-testid*="bank-deposit-products-detail"], [data-testid*="product-detail"]'
+        ) || (host.children.length ? host : null);
+      };
+
+      const detalheTemConteudo = linha => {
+        const raiz = obterRaizDetalhe(linha);
+        return raiz && texto(raiz).length > 0 ? raiz : null;
       };
 
       const obterMapaDetalhes = raiz => {
         const mapa = new Map();
         if (!raiz) return mapa;
 
-        raiz.querySelectorAll(".bank-deposit-products-detail__infos-item").forEach(item => {
-          const rotulo = normalizar(texto(item.querySelector("small, label, dt")));
-          const valor = texto(item.querySelector("span, strong, dd, p"));
-          if (rotulo && valor && !mapa.has(rotulo)) mapa.set(rotulo, valor);
+        const adicionar = (rotulo, valor) => {
+          const chave = normalizar(rotulo);
+          const conteudo = texto(valor);
+          if (chave && conteudo && !mapa.has(chave)) mapa.set(chave, conteudo);
+        };
+
+        // Estrutura atual do BTG (2026):
+        // <div info-item><span info-label>Código do produto</span><span info-value>...</span></div>
+        raiz.querySelectorAll('[info-item]').forEach(item => {
+          const rotuloEl = item.querySelector('[info-label]');
+          const valorEl = item.querySelector('[info-value]');
+          adicionar(texto(rotuloEl), valorEl);
+        });
+
+        // Estrutura anterior do BTG, mantida por compatibilidade.
+        raiz.querySelectorAll('.bank-deposit-products-detail__infos-item').forEach(item => {
+          adicionar(
+            texto(item.querySelector('small, label, dt, [info-label]')),
+            item.querySelector('span, strong, dd, p, [info-value]')
+          );
+        });
+
+        // Fallback genérico para rótulo/valor em atributos sem depender das classes Angular.
+        raiz.querySelectorAll('[info-label]').forEach(rotuloEl => {
+          const item = rotuloEl.closest('[info-item]') || rotuloEl.parentElement;
+          const valorEl = item?.querySelector('[info-value]');
+          if (valorEl) adicionar(texto(rotuloEl), valorEl);
+        });
+
+        raiz.querySelectorAll('small, label, dt').forEach(rotuloEl => {
+          const rotulo = texto(rotuloEl);
+          if (!rotulo) return;
+          const pai = rotuloEl.closest('div, li, section, article') || rotuloEl.parentElement;
+          if (!pai) return;
+
+          const candidatos = [...pai.querySelectorAll('span, strong, dd, p')]
+            .filter(el => el !== rotuloEl && !rotuloEl.contains(el));
+          const valorEl = candidatos.find(el =>
+            texto(el) && normalizar(texto(el)) !== normalizar(rotulo)
+          );
+          if (valorEl) adicionar(rotulo, valorEl);
         });
 
         return mapa;
@@ -194,84 +439,201 @@ async function extrairNaPagina(tabId) {
 
       const obterCampo = (mapa, alternativas) => {
         const esperados = alternativas.map(normalizar);
-
         for (const [rotulo, valor] of mapa.entries()) {
           if (esperados.includes(rotulo)) return valor;
         }
-
         for (const [rotulo, valor] of mapa.entries()) {
           if (esperados.some(esperado => rotulo.includes(esperado))) return valor;
         }
-
         return "";
       };
 
-      const linhas = [...document.querySelectorAll(
-        'tr[data-testid="product"], tr.bank-deposit-products__product'
-      )].filter(linha => linha.querySelector(".bank-deposit-products__product-title"));
+      const obterAba = (raiz, nomes) => {
+        if (!raiz) return null;
+        const esperados = nomes.map(normalizar);
+        return [...raiz.querySelectorAll('.orq-tabs__tab, [role="tab"], [data-testid*="tab"]')]
+          .find(item => {
+            const valor = normalizar(texto(item));
+            return esperados.some(esperado => valor.includes(esperado));
+          }) || null;
+      };
 
-      if (linhas.length === 0) {
-        return {
-          produtos: [],
-          motivo: "Nenhuma linha de produto foi encontrada no HTML da página atual."
-        };
-      }
+      const abaAtiva = aba => Boolean(
+        aba?.classList?.contains('orq-tabs__tab--active') ||
+        aba?.getAttribute?.('aria-selected') === 'true'
+      );
 
-      const produtos = [];
-
-      for (const linha of linhas) {
-        const celulas = [...linha.querySelectorAll(":scope > td")];
-        const celulaProduto = celulas[0];
-        const pequenos = [...(celulaProduto?.querySelectorAll("small") || [])]
-          .map(texto)
-          .filter(Boolean);
-
-        const precoQuantidade = celulas[3]?.querySelector(
-          ".bank-deposit-products__product-quantity"
+      const obterTabelaAquisicoes = raiz => {
+        if (!raiz) return null;
+        const especifica = raiz.querySelector(
+          'table[data-testid="table-position-acquisition"], ' +
+          '[data-testid="table-position-acquisition"] table'
         );
+        if (especifica) return especifica;
 
-        const produto = {
+        return [...raiz.querySelectorAll('table')].find(tabela => {
+          const cabecalhos = [...tabela.querySelectorAll('thead th')]
+            .map(item => normalizar(texto(item)));
+          return cabecalhos.some(rotulo =>
+            rotulo === 'vlr. aquisicao' ||
+            rotulo.includes('valor aquisicao') ||
+            rotulo.includes('vlr aquisicao')
+          );
+        }) || null;
+      };
+
+      const obterValorAquisicao = tabela => {
+        if (!tabela) return null;
+        const cabecalhos = [...tabela.querySelectorAll('thead th')]
+          .map(item => normalizar(texto(item)));
+        const indice = cabecalhos.findIndex(rotulo =>
+          rotulo === 'vlr. aquisicao' ||
+          rotulo.includes('valor aquisicao') ||
+          rotulo.includes('vlr aquisicao')
+        );
+        if (indice < 0) return null;
+
+        const valores = [...tabela.querySelectorAll('tbody tr')]
+          .map(item => texto(item.querySelectorAll('td')[indice]))
+          .map(valor => Number(valor
+            .replace(/^R\$\s*/i, '')
+            .replace(/\./g, '')
+            .replace(',', '.')
+            .replace(/[^\d.-]/g, '')))
+          .filter(Number.isFinite);
+
+        return valores.length
+          ? valores.reduce((total, valor) => total + valor, 0)
+          : null;
+      };
+
+      const produtos = linhas.map(linha => {
+        const celulas = [...linha.querySelectorAll(':scope > td')];
+        const pq = obterPrecoQuantidade(linha);
+        return {
           codigo: "",
-          produto: texto(celulaProduto?.querySelector(".bank-deposit-products__product-title")),
+          produto: obterTituloProduto(linha),
           tipo: obterCategoria(linha),
-          precoUnitario: texto(precoQuantidade?.querySelector("span")),
-          quantidade: texto(precoQuantidade?.querySelector("small")),
+          valorInvestido: null,
+          precoUnitario: pq.precoUnitario,
+          quantidade: pq.quantidade,
           emissao: "",
           vencimento: texto(celulas[1]),
           taxa: texto(celulas[2]),
           valorLiquido: texto(celulas[4])
         };
+      });
 
-        const linhaDetalhe = linha.nextElementSibling;
-        const containerDetalhe = linhaDetalhe?.querySelector(".bank-deposit-products__product-detail");
-        let raizDetalhe = containerDetalhe?.querySelector(
-          "portfolio-bank-deposit-products-detail, .bank-deposit-products-detail"
-        );
+      // A estrutura atual do BTG injeta o conteúdo do detalhe somente depois
+      // da expansão da linha. Abrir dezenas de títulos ao mesmo tempo pode fazer o
+      // componente reutilizar/fechar painéis antes da leitura. Por isso os detalhes
+      // são vinculados à linha exata: abre -> espera "Código do produto" -> lê ->
+      // consulta aquisição -> fecha -> segue. Não há timeout fixo quando o conteúdo
+      // já está disponível; a espera ocorre somente enquanto o Angular renderiza.
+      let detalhesLidos = 0;
+      let aquisicoesLidas = 0;
 
-        let abriuAgora = false;
-        if (!raizDetalhe) {
-          const expansor = linha.querySelector(".bank-deposit-products__product-expand-button");
-          dispararClique(expansor);
-          abriuAgora = true;
+      const lerCodigoEEmissaoDaLinha = linha => {
+        const host = obterHostDetalhe(linha);
+        const mapa = obterMapaDetalhes(host);
+        return {
+          codigo: obterCampo(mapa, [
+            'Código do produto', 'Codigo do produto', 'Código', 'Codigo'
+          ]),
+          emissao: obterCampo(mapa, [
+            'Data de emissão', 'Data de emissao', 'Emissão', 'Emissao'
+          ])
+        };
+      };
 
-          raizDetalhe = await esperarAte(() => containerDetalhe?.querySelector(
-            "portfolio-bank-deposit-products-detail, .bank-deposit-products-detail"
-          ));
+      const esperarCodigoDaLinha = linha => esperarAte(() => {
+        const dados = lerCodigoEEmissaoDaLinha(linha);
+        return dados.codigo ? dados : null;
+      }, 1200, 25);
+
+      for (let indice = 0; indice < linhas.length; indice += 1) {
+        const linha = linhas[indice];
+        const produto = produtos[indice];
+
+        let dadosDetalhe = lerCodigoEEmissaoDaLinha(linha);
+        let abriuPeloPlugin = false;
+
+        // Código é obrigatório no portal. Se ainda não está no DOM, expande esta
+        // linha específica e só avança depois que o info-item correspondente surgir.
+        if (!dadosDetalhe.codigo) {
+          linha.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+          await esperar(15);
+          const expansor = obterExpansor(linha);
+          if (clicar(expansor)) abriuPeloPlugin = true;
+          dadosDetalhe = (await esperarCodigoDaLinha(linha)) || lerCodigoEEmissaoDaLinha(linha);
+
+          // Segunda janela curta de espera sem novo clique. Evita fechar um painel
+          // que abriu corretamente mas cujo conteúdo Angular demorou um pouco mais.
+          if (!dadosDetalhe.codigo) {
+            dadosDetalhe = (await esperarAte(() => {
+              const dados = lerCodigoEEmissaoDaLinha(linha);
+              return dados.codigo ? dados : null;
+            }, 900, 30)) || lerCodigoEEmissaoDaLinha(linha);
+          }
         }
 
-        const mapa = obterMapaDetalhes(raizDetalhe);
-        produto.codigo = obterCampo(mapa, ["Código do produto", "Codigo do produto"]);
-        produto.emissao = obterCampo(mapa, ["Data de emissão", "Data de emissao", "Emissão", "Emissao"]);
-        produtos.push(produto);
+        // Alguns layouts abrem outra aba por padrão. Se a emissão ainda não apareceu,
+        // seleciona "Detalhes" e relê o mesmo painel da mesma linha.
+        if (!dadosDetalhe.emissao) {
+          const raiz = obterRaizDetalhe(linha) || obterHostDetalhe(linha);
+          const abaDetalhes = obterAba(raiz, ['Detalhes']);
+          if (abaDetalhes && !abaAtiva(abaDetalhes)) {
+            clicar(abaDetalhes);
+            await esperarAte(() => {
+              const dados = lerCodigoEEmissaoDaLinha(linha);
+              return (dados.codigo || dados.emissao) ? dados : null;
+            }, 500, 25);
+            dadosDetalhe = lerCodigoEEmissaoDaLinha(linha);
+          }
+        }
 
-        if (abriuAgora) {
-          const expansor = linha.querySelector(".bank-deposit-products__product-expand-button");
-          dispararClique(expansor);
-          await esperar(40);
+        produto.codigo = dadosDetalhe.codigo || '';
+        produto.emissao = dadosDetalhe.emissao || '';
+        if (produto.codigo || produto.emissao) detalhesLidos += 1;
+
+        // Valor Investido continua vindo exclusivamente de "Vlr. Aquisição".
+        // A leitura também é vinculada ao painel atual, evitando misturar produtos.
+        const raiz = obterRaizDetalhe(linha) || obterHostDetalhe(linha);
+        if (raiz) {
+          let tabela = obterTabelaAquisicoes(raiz);
+          if (!tabela) {
+            const abaAquisicao = obterAba(raiz, [
+              'Posição por aquisição', 'Posicao por aquisicao', 'Aquisição', 'Aquisicao'
+            ]);
+            if (abaAquisicao) {
+              if (!abaAtiva(abaAquisicao)) clicar(abaAquisicao);
+              tabela = await esperarAte(() => obterTabelaAquisicoes(
+                obterRaizDetalhe(linha) || obterHostDetalhe(linha)
+              ), 850, 25);
+            }
+          }
+
+          const valor = obterValorAquisicao(tabela);
+          produto.valorInvestido = valor;
+          if (Number.isFinite(valor)) aquisicoesLidas += 1;
+        }
+
+        // Fecha somente o painel aberto pelo plugin. Uma pausa mínima permite que o
+        // Angular conclua a animação sem acumular eventos de clique.
+        if (abriuPeloPlugin) {
+          clicar(obterExpansor(linha));
+          await esperar(12);
         }
       }
 
-      return { produtos };
+      return {
+        produtos,
+        diagnostico: {
+          total: produtos.length,
+          detalhesLidos,
+          aquisicoesLidas
+        }
+      };
     }
   });
 
@@ -281,7 +643,7 @@ async function extrairNaPagina(tabId) {
 botao.addEventListener("click", async () => {
   botao.disabled = true;
   definirMensagem(
-    "Lendo as linhas e abrindo os detalhes de cada produto. Aguarde até o download iniciar.",
+    "Lendo a carteira, buscando detalhes e calculando as colunas derivadas...",
     "info"
   );
 
@@ -290,27 +652,42 @@ botao.addEventListener("click", async () => {
     const resposta = await extrairNaPagina(aba.id);
     const produtos = Array.isArray(resposta?.produtos) ? resposta.produtos : [];
 
-    if (produtos.length === 0) {
+    if (!produtos.length) {
       throw new Error(
-        resposta?.motivo ||
-        "Nenhum produto foi encontrado. Abra a carteira, expanda a categoria de renda fixa e tente novamente."
+        resposta?.motivo || "Nenhum produto foi encontrado na carteira atual."
       );
     }
 
-    baixarArquivo(gerarTsv(produtos));
+    const semCodigo = produtos.filter(p => !p.codigo).length;
+    const semValorInvestido = produtos.filter(p => !Number.isFinite(p.valorInvestido)).length;
+    const semEmissao = produtos.filter(p => !p.emissao).length;
 
-    const semCodigo = produtos.filter(produto => !produto.codigo).length;
-    const semPrecoUnitario = produtos.filter(produto => !produto.precoUnitario).length;
-    const semQuantidade = produtos.filter(produto => !produto.quantidade).length;
-    const semEmissao = produtos.filter(produto => !produto.emissao).length;
+    if (semCodigo) {
+      const exemplos = produtos
+        .filter(p => !p.codigo)
+        .slice(0, 5)
+        .map(p => p.produto)
+        .filter(Boolean)
+        .join(", ");
+      throw new Error(
+        `O BTG possui código para todos os títulos, mas ${semCodigo} código(s) não foram lidos. ` +
+        `O arquivo não foi gerado para evitar exportação incompleta.` +
+        (exemplos ? ` Títulos: ${exemplos}${semCodigo > 5 ? "..." : ""}` : "")
+      );
+    }
 
-    if (semCodigo || semPrecoUnitario || semQuantidade || semEmissao) {
+    definirMensagem(`Preparando ${produtos.length} produtos...`, "info");
+    await baixarArquivo(gerarTsv(produtos));
+
+    if (semCodigo || semValorInvestido || semEmissao) {
       definirMensagem(
-        `${produtos.length} produtos exportados. Campos não lidos: código em ${semCodigo} linha(s), preço unitário em ${semPrecoUnitario}, quantidade em ${semQuantidade} e emissão em ${semEmissao}.`,
+        `${produtos.length} produtos exportados. Dados não encontrados no BTG: ` +
+        `código em ${semCodigo}, valor investido em ${semValorInvestido} e emissão em ${semEmissao}. ` +
+        `As colunas derivadas foram calculadas somente quando havia dados suficientes.`,
         "info"
       );
     } else {
-      definirMensagem(`${produtos.length} produtos exportados com sucesso.`, "success");
+      definirMensagem(`${produtos.length} produtos exportados com todas as colunas.`, "success");
     }
   } catch (erro) {
     console.error(erro);

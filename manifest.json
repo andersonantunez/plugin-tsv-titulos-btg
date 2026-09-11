@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Carteira para TSV",
-  "version": "2.5.0",
-  "description": "Exporta os produtos de renda fixa exibidos na carteira para um arquivo TSV.",
+  "version": "2.10.2",
+  "description": "Exporta a carteira de renda fixa do BTG para TSV com 15 colunas e leitura de detalhes vinculada a cada título.",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "downloads"
   ],
   "action": {
     "default_title": "Carteira para TSV",
